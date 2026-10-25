@@ -1,0 +1,865 @@
+-- ==============================================================================
+-- TANG HUB - Ultimate Slap & Combat Automation (V12 - Human Cadence & Zero Notification Spam)
+-- Target Place ID: 106683702021527
+-- ==============================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ------------------------------------------------------------------------------
+-- 1. CONFIGURATION
+-- ------------------------------------------------------------------------------
+local Config = {
+    -- Slap Settings
+    AutoSlap = true,             -- ตบอัตโนมัติ
+    AutoMashSlap = true,         -- ปั๊มปุ่ม SLAP จังหวะธรรมชาติ (ไม่เร็วเกินไป เนียนตาเหมือนคนกดจริง)
+    MashInterval = 0.18,         -- จังหวะกด 0.18 วินาทีต่อคลิก (~5-6 ครั้ง/วินาที เป็นธรรมชาติ คนดูไม่ออก)
+    MashClickCount = 6,          -- ปั๊ม 6 ครั้งขึ้นเต็ม 100%
+    InstaFling = true,           -- ส่งสัญญาณ BikeKickFling การันตีกระเด็นหลุดสังเวียนตาย
+    
+    -- Dodge Settings
+    AutoDodge = true,            -- หลบอัตโนมัติ W / A / S / D
+    DodgeDelay = 0.0,
+    
+    -- Slapper & Guess Settings
+    NotifyAttacker = true,       -- แจ้งเตือนคนตบ (แจ้งเตือนครั้งเดียวต่อรอบ ไม่สแปม)
+    AttackerESP = true,          -- ไฮไลท์ตัวคนตบสีแดง
+    HighlightSuspectCard = true, -- เปลี่ยนกรอบการ์ดในป้าย Suspects เป็นสีเขียวนีออน
+    AutoGuess = true,            -- คลิกทายคนที่ตบจริงในการ์ดให้อัตโนมัติ
+    AutoSaveStreak = true,       -- เซฟสตรีคอัตโนมัติ
+}
+
+-- ------------------------------------------------------------------------------
+-- 2. ON-SCREEN BANNER HUD
+-- ------------------------------------------------------------------------------
+local guiParent = pcall(function() return CoreGui end) and CoreGui or LocalPlayer:WaitForChild("PlayerGui")
+
+local bannerGui = Instance.new("ScreenGui")
+bannerGui.Name = "TangHub_BannerHUD"
+bannerGui.ResetOnSpawn = false
+bannerGui.DisplayOrder = 999
+pcall(function() bannerGui.Parent = guiParent end)
+
+local bannerFrame = Instance.new("Frame")
+bannerFrame.Name = "Banner"
+bannerFrame.AnchorPoint = Vector2.new(0.5, 0)
+bannerFrame.Position = UDim2.new(0.5, 0, 0, 15)
+bannerFrame.Size = UDim2.new(0, 440, 0, 50)
+bannerFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+bannerFrame.BorderSizePixel = 0
+bannerFrame.Visible = false
+bannerFrame.Parent = bannerGui
+
+local bannerCorner = Instance.new("UICorner")
+bannerCorner.CornerRadius = UDim.new(0, 10)
+bannerCorner.Parent = bannerFrame
+
+local bannerStroke = Instance.new("UIStroke")
+bannerStroke.Color = Color3.fromRGB(255, 65, 84)
+bannerStroke.Thickness = 2
+bannerStroke.Parent = bannerFrame
+
+local bannerText = Instance.new("TextLabel")
+bannerText.Size = UDim2.fromScale(1, 1)
+bannerText.BackgroundTransparency = 1
+bannerText.Font = Enum.Font.GothamBold
+bannerText.TextSize = 16
+bannerText.TextColor3 = Color3.fromRGB(255, 255, 255)
+bannerText.Text = ""
+bannerText.Parent = bannerFrame
+
+local currentBannerThread = nil
+local function showBanner(text, color, duration)
+    bannerText.Text = text
+    bannerStroke.Color = color or Color3.fromRGB(255, 65, 84)
+    bannerFrame.Visible = true
+    
+    if currentBannerThread then
+        task.cancel(currentBannerThread)
+    end
+    currentBannerThread = task.delay(duration or 3, function()
+        bannerFrame.Visible = false
+    end)
+end
+
+-- ระบบแจ้งเตือนแบบป้องกันสแปมเด็ดขาด (Anti-Spam Debounce)
+local lastNotifyText = ""
+local lastNotifyTime = 0
+
+local function notifyOnce(title, text, duration)
+    local now = tick()
+    -- ป้องกันข้อความเดิมเด้งซ้ำภายใน 25 วินาทีเด็ดขาด
+    if text == lastNotifyText and (now - lastNotifyTime < 25) then 
+        return 
+    end
+    if now - lastNotifyTime < 6 then 
+        return 
+    end
+    
+    lastNotifyText = text
+    lastNotifyTime = now
+    
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "[TANG HUB] " .. title,
+            Text = text,
+            Duration = duration or 3,
+        })
+    end)
+end
+
+-- ------------------------------------------------------------------------------
+-- 3. HTTP REQUEST & UI LIBRARY LOADER
+-- ------------------------------------------------------------------------------
+local httpRequest = (syn and syn.request) 
+    or (http and http.request) 
+    or http_request 
+    or (fluxus and fluxus.request) 
+    or request
+
+local function fetchSource(url)
+    if httpRequest then
+        local res = httpRequest({ Url = url, Method = "GET" })
+        if res and res.Body then return res.Body end
+    end
+    if game.HttpGet then return game:HttpGet(url) end
+    return nil
+end
+
+getgenv().TangHubLibraryOnly = true
+local UI_URL = "https://raw.githubusercontent.com/wspgs/Tangui.2/refs/heads/main/ui"
+local Library = nil
+
+task.spawn(function()
+    local ok, uiRaw = pcall(fetchSource, UI_URL)
+    if ok and uiRaw then
+        local chunk = loadstring(uiRaw)
+        if chunk then
+            local success, lib = pcall(chunk)
+            if success and lib then
+                Library = lib
+                buildUI()
+            end
+        end
+    end
+end)
+
+-- ------------------------------------------------------------------------------
+-- 4. GAME REMOTES
+-- ------------------------------------------------------------------------------
+local events = ReplicatedStorage:WaitForChild("events", 10) or ReplicatedStorage
+
+local Remotes = {
+    Guess = events:FindFirstChild("Guess"),
+    Resety = events:FindFirstChild("Resety"),
+    SendSlap = events:FindFirstChild("SendSlap"),
+    ShowSlap = events:FindFirstChild("ShowSlap"),
+    SlapQueue = events:FindFirstChild("SlapQueue"),
+    SlapPercent = events:FindFirstChild("SlapPercent"),
+    RunMeter = events:FindFirstChild("RunMeter"),
+    Dodge = events:FindFirstChild("Dodge"),
+    DodgePrompt = events:FindFirstChild("DodgePrompt"),
+    DodgeResult = events:FindFirstChild("DodgeResult"),
+    SaveStreak = events:FindFirstChild("SaveStreak"),
+    BikeKickFling = events:FindFirstChild("BikeKickFling"),
+    EquipSlap = events:FindFirstChild("EquipSlap"),
+    EquipDodge = events:FindFirstChild("EquipDodge"),
+    UpdateWins = events:FindFirstChild("UpdateWins"),
+}
+
+-- ------------------------------------------------------------------------------
+-- 5. GUI & ARENA DETECTION
+-- ------------------------------------------------------------------------------
+local function getScreenGui()
+    local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+    return pgui and pgui:FindFirstChild("ScreenGui")
+end
+
+local function getSlapButton()
+    local sg = getScreenGui()
+    return sg and sg:FindFirstChild("slapbut")
+end
+
+local function getDodgeButton()
+    local sg = getScreenGui()
+    return sg and sg:FindFirstChild("dodgebut")
+end
+
+local function getMeterFrame()
+    local sg = getScreenGui()
+    return sg and sg:FindFirstChild("meter")
+end
+
+local function isDodgePromptActive(btn)
+    btn = btn or getDodgeButton()
+    if not btn or not btn.Visible then return false end
+    local absSize = btn.AbsoluteSize
+    if absSize.X < 5 or absSize.Y < 5 then return false end
+    if btn.TextTransparency and btn.TextTransparency >= 0.95 and btn.BackgroundTransparency >= 0.95 then
+        return false
+    end
+    return true
+end
+
+local function isMeterActive(meter)
+    meter = meter or getMeterFrame()
+    if not meter or not meter.Visible then return false end
+    local absSize = meter.AbsoluteSize
+    if absSize.Y < 30 then return false end
+    return true
+end
+
+local function getButtonCombinedText(btn)
+    if not btn then return "" end
+    local fullText = btn.Text or ""
+    for _, child in ipairs(btn:GetChildren()) do
+        if child:IsA("TextLabel") or child:IsA("TextButton") then
+            fullText = fullText .. " " .. (child.Text or "")
+        end
+    end
+    return fullText:lower()
+end
+
+-- ตรวจสอบว่าปุ่ม SLAP พร้อมให้กดจริงหรือไม่ (อิงจากปุ่ม slapbut ตัวจริงเท่านั้น ไม่พึ่งพา meter)
+local function isSlapPromptActive()
+    local sg = getScreenGui()
+    if not sg then return false end
+    
+    -- ถ้าเปิดหน้าจอทาย suspects อยู่ แปลว่าไม่ได้อยู่ในช่วงตบ
+    local suspects = sg:FindFirstChild("suspects")
+    if suspects and suspects.Visible then
+        return false
+    end
+    
+    local btn = sg:FindFirstChild("slapbut")
+    if not btn or not btn.Visible then
+        return false
+    end
+    
+    local absSize = btn.AbsoluteSize
+    if absSize.X < 15 or absSize.Y < 15 then
+        return false
+    end
+    
+    local pos = btn.AbsolutePosition
+    if pos.X < -50 or pos.Y < -50 then
+        return false
+    end
+    
+    local txt = getButtonCombinedText(btn)
+    -- ถ้ามีคำว่า Wait... แปลว่ายังไม่ถึงคิวตบ
+    if string.find(txt, "wait") then
+        return false
+    end
+    
+    return true
+end
+
+local function isPlayerSittingInArena(player)
+    if not player or not player.Character then return false end
+    local hum = player.Character:FindFirstChild("Humanoid")
+    if hum and hum.Sit and hum.SeatPart then
+        local seat = hum.SeatPart
+        if seat.Name == "Seat" and seat.Parent and seat.Parent.Name == "Chair" then
+            return true
+        end
+    end
+    return false
+end
+
+local function getCurrentArena()
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myPos = myHRP and myHRP.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
+    if not myPos then return nil end
+    
+    local arenas = workspace:FindFirstChild("arenas")
+    if not arenas then return nil end
+    
+    local closestArena = nil
+    local closestDist = math.huge
+    for _, arena in ipairs(arenas:GetChildren()) do
+        local seat = arena:FindFirstChild("Chair") and arena.Chair:FindFirstChild("Seat")
+        if seat then
+            local dist = (seat.Position - myPos).Magnitude
+            if dist < closestDist and dist <= 45 then
+                closestDist = dist
+                closestArena = arena
+            end
+        end
+    end
+    return closestArena
+end
+
+-- ------------------------------------------------------------------------------
+-- 6. NATURAL HUMAN BURST SLAP (ตบจังหวะธรรมชาติ เนียนตา ปั๊มเต็ม 100% ทุกรอบ)
+-- ------------------------------------------------------------------------------
+local hasSlappedThisTurn = false
+local isSlappingNow = false
+
+local function performNaturalBurstSlap()
+    if isSlappingNow or hasSlappedThisTurn then return end
+    isSlappingNow = true
+    hasSlappedThisTurn = true
+    
+    showBanner("💥 กำลังปั๊มเกจตบ 100%...", Color3.fromRGB(255, 170, 0), 2)
+    
+    task.spawn(function()
+        local count = Config.MashClickCount or 6
+        for i = 1, count do
+            -- ตรวจสอบว่าปุ่มยังพร้อมให้กดอยู่หรือไม่ ถ้าหมดจังหวะให้หยุดทันที
+            if not isSlapPromptActive() then break end
+            
+            local slapBtn = getSlapButton()
+            if not slapBtn or not slapBtn.Visible then break end
+            
+            local btnPos = slapBtn.AbsolutePosition + (slapBtn.AbsoluteSize / 2)
+            
+            -- จำลองการคลิกเมาส์จริงแบบมนุษย์ (กดลง -> ปล่อย)
+            pcall(function()
+                VirtualInputManager:SendMouseButtonEvent(btnPos.X, btnPos.Y, 0, true, game, 1)
+                VirtualInputManager:SendMouseButtonEvent(btnPos.X, btnPos.Y, 0, false, game, 1)
+            end)
+            
+            -- ส่งอีเวนต์เข้าตัวปุ่มโดยตรง
+            if firesignal then
+                pcall(function() firesignal(slapBtn.MouseButton1Click) end)
+                pcall(function() firesignal(slapBtn.Activated) end)
+            end
+            
+            -- สำคัญ: ไม่ส่ง Remote ใดๆ ในลูป เพื่อไม่ให้เซิร์ฟเวอร์ตัดจบเกจก่อนกดครบ 6 ครั้ง
+            task.wait(Config.MashInterval or 0.18)
+        end
+        
+        -- ปั๊มเต็ม 100% แล้ว จึงส่งสัญญาณยืนยันการตบเต็มแรงและปลิดชีพ
+        pcall(function() Remotes.SlapPercent:FireServer(100) end)
+        pcall(function() Remotes.SlapPercent:FireServer(1.0) end)
+        pcall(function() Remotes.RunMeter:FireServer(100) end)
+        pcall(function() Remotes.SendSlap:FireServer(100) end)
+        pcall(function() Remotes.SendSlap:FireServer() end)
+        
+        -- ส่ง Fling ซัดศัตรูหลุดสังเวียนตาย
+        if Config.InstaFling and Remotes.BikeKickFling then
+            task.wait(0.08)
+            pcall(function() Remotes.BikeKickFling:FireServer() end)
+        end
+        
+        showBanner("🔥 ปั๊มเต็ม 100% เรียบร้อย!", Color3.fromRGB(50, 220, 120), 2)
+        isSlappingNow = false
+        
+        -- ปลดล็อกสถานะอัตโนมัติ เพื่อให้พร้อมสำหรับการตบรอบถัดไป 100% เสมอ
+        task.delay(1.5, function()
+            hasSlappedThisTurn = false
+        end)
+    end)
+end
+
+-- ------------------------------------------------------------------------------
+-- 7. ACCURATE ATTACKER DETECTION (ระบบป้องกันแจ้งเตือนซ้ำซ้อนเด็ดขาด)
+-- ------------------------------------------------------------------------------
+local lastIdentifiedSlapper = nil
+local currentHighlight = nil
+local currentBillboard = nil
+local lastIdentifiedTime = 0
+local hasNotifiedAttackerThisRound = false
+
+local function clearAttackerESP()
+    if currentHighlight then
+        pcall(function() currentHighlight:Destroy() end)
+        currentHighlight = nil
+    end
+    if currentBillboard then
+        pcall(function() currentBillboard:Destroy() end)
+        currentBillboard = nil
+    end
+end
+
+local function setIdentifiedSlapper(player, sourceReason)
+    if not player or player == LocalPlayer then return end
+    if isPlayerSittingInArena(player) then return end
+    
+    lastIdentifiedSlapper = player
+    lastIdentifiedTime = tick()
+    
+    -- ถ้าแจ้งเตือนคนนี้ไปแล้วในรอบนี้ ไม่ต้องแจ้งเตือนซ้ำเด็ดขาด!
+    if not hasNotifiedAttackerThisRound then
+        hasNotifiedAttackerThisRound = true
+        local name = player.DisplayName or player.Name
+        showBanner("🎯 คนที่ตบคือ: " .. name .. " !", Color3.fromRGB(255, 45, 60), 4)
+        notifyOnce("ตรวจพบคนตบ!", "🎯 คนที่ตบคือ: " .. name, 3)
+    end
+    
+    if Config.AttackerESP and player.Character then
+        clearAttackerESP()
+        local char = player.Character
+        local hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+        if hrp then
+            local hl = Instance.new("Highlight")
+            hl.Name = "TangHub_AttackerHighlight"
+            hl.FillColor = Color3.fromRGB(255, 30, 30)
+            hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+            hl.FillTransparency = 0.2
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Adornee = char
+            hl.Parent = char
+            currentHighlight = hl
+            
+            local bb = Instance.new("BillboardGui")
+            bb.Name = "TangHub_AttackerBB"
+            bb.Adornee = hrp
+            bb.Size = UDim2.new(0, 220, 0, 50)
+            bb.StudsOffset = Vector3.new(0, 3.5, 0)
+            bb.AlwaysOnTop = true
+            
+            local tl = Instance.new("TextLabel")
+            tl.Size = UDim2.fromScale(1, 1)
+            tl.BackgroundTransparency = 1
+            tl.Font = Enum.Font.GothamBlack
+            tl.TextSize = 18
+            tl.TextColor3 = Color3.fromRGB(255, 50, 50)
+            tl.TextStrokeTransparency = 0
+            tl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+            tl.Text = "🎯 คนตบคือ: " .. (player.DisplayName or player.Name) .. " 🎯"
+            tl.Parent = bb
+            bb.Parent = char
+            currentBillboard = bb
+            
+            task.delay(6, function()
+                if currentHighlight == hl then clearAttackerESP() end
+            end)
+        end
+    end
+end
+
+-- สแกนคนตบจากสังเวียนจริง
+local function scanArenaForSlapper()
+    local arena = getCurrentArena()
+    if not arena then return end
+    
+    local seat = arena:FindFirstChild("Chair") and arena.Chair:FindFirstChild("Seat")
+    if not seat then return end
+    
+    local suspects = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            if not isPlayerSittingInArena(p) then
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                if hrp and (hrp.Position - seat.Position).Magnitude <= 25 then
+                    table.insert(suspects, p)
+                end
+            end
+        end
+    end
+    
+    if #suspects == 1 then
+        setIdentifiedSlapper(suspects[1], "Solo Suspect")
+        return
+    end
+    
+    for _, p in ipairs(suspects) do
+        local hum = p.Character:FindFirstChild("Humanoid")
+        local animator = hum and hum:FindFirstChildWhichIsA("Animator")
+        if animator then
+            for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                if track.IsPlaying and track.Animation then
+                    local aName = track.Animation.Name:lower()
+                    if string.find(aName, "slap") or string.find(aName, "punch") or string.find(aName, "kick") then
+                        setIdentifiedSlapper(p, "Attack Animation")
+                        return
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function parsePlayerFromArg(arg)
+    if not arg then return nil end
+    if typeof(arg) == "Instance" then
+        if arg:IsA("Player") then return arg end
+        if arg:IsA("Model") and Players:GetPlayerFromCharacter(arg) then
+            return Players:GetPlayerFromCharacter(arg)
+        end
+    elseif typeof(arg) == "string" and #arg > 0 then
+        local p = Players:FindFirstChild(arg)
+        if p then return p end
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl.DisplayName:lower() == arg:lower() or pl.Name:lower() == arg:lower() then
+                return pl
+            end
+        end
+    elseif typeof(arg) == "table" then
+        for _, v in pairs(arg) do
+            local found = parsePlayerFromArg(v)
+            if found then return found end
+        end
+    end
+    return nil
+end
+
+local function handleCombatRemote(...)
+    hasNotifiedAttackerThisRound = false -- เริ่มการตบรอบใหม่ รีเซ็ตให้แจ้งเตือนได้
+    for _, a in ipairs({...}) do
+        local p = parsePlayerFromArg(a)
+        if p and p ~= LocalPlayer and not isPlayerSittingInArena(p) then
+            setIdentifiedSlapper(p, "Combat Remote")
+            return
+        end
+    end
+end
+
+if Remotes.ShowSlap then Remotes.ShowSlap.OnClientEvent:Connect(handleCombatRemote) end
+if Remotes.SlapQueue then Remotes.SlapQueue.OnClientEvent:Connect(handleCombatRemote) end
+
+-- ------------------------------------------------------------------------------
+-- 8. SUSPECTS BOARD & AUTO GUESS
+-- ------------------------------------------------------------------------------
+local lastGuessedTarget = nil
+local function checkAndHighlightSuspects()
+    local sg = getScreenGui()
+    if not sg then return end
+    
+    local suspectsFrame = sg:FindFirstChild("suspects")
+    if not suspectsFrame or not suspectsFrame.Visible then 
+        if lastGuessedTarget ~= nil then
+            -- เมื่อปิดป้ายทาย แปลว่าจบรอบแล้ว รีเซ็ตสถานะทั้งหมดเพื่อเตรียมพร้อมสำหรับรอบถัดไป
+            lastGuessedTarget = nil
+            hasNotifiedAttackerThisRound = false
+            lastIdentifiedSlapper = nil
+            clearAttackerESP()
+        end
+        return 
+    end
+    
+    if not lastIdentifiedSlapper or tick() - lastIdentifiedTime > 20 then
+        scanArenaForSlapper()
+        if not lastIdentifiedSlapper then return end
+    end
+    
+    local targetName = (lastIdentifiedSlapper.Name):lower()
+    local targetDisplay = (lastIdentifiedSlapper.DisplayName):lower()
+    
+    for _, item in ipairs(suspectsFrame:GetDescendants()) do
+        if item:IsA("TextLabel") or item:IsA("TextButton") then
+            local txt = item.Text:lower()
+            if string.find(txt, targetName) or string.find(txt, targetDisplay) then
+                local cardBtn = item:FindFirstAncestorWhichIsA("GuiButton") or (item:IsA("GuiButton") and item)
+                if cardBtn then
+                    if Config.HighlightSuspectCard then
+                        cardBtn.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+                        local stroke = cardBtn:FindFirstChildWhichIsA("UIStroke") or Instance.new("UIStroke")
+                        stroke.Color = Color3.fromRGB(0, 255, 128)
+                        stroke.Thickness = 4
+                        stroke.Parent = cardBtn
+                    end
+                    
+                    if Config.AutoGuess and lastGuessedTarget ~= lastIdentifiedSlapper then
+                        lastGuessedTarget = lastIdentifiedSlapper
+                        if firesignal then
+                            firesignal(cardBtn.MouseButton1Click)
+                        elseif VirtualInputManager then
+                            local pos = cardBtn.AbsolutePosition + (cardBtn.AbsoluteSize / 2)
+                            VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+                            task.wait(0.02)
+                            VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+                        end
+                        pcall(function() Remotes.Guess:FireServer(lastIdentifiedSlapper) end)
+                        pcall(function() Remotes.Guess:FireServer(lastIdentifiedSlapper.Name) end)
+                        showBanner("🎯 ทายคนตบ: [" .. lastIdentifiedSlapper.DisplayName .. "] สำเร็จ!", Color3.fromRGB(46, 204, 113), 3.5)
+                    end
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- ------------------------------------------------------------------------------
+-- 9. AUTO DODGE (WASD SUPPORT)
+-- ------------------------------------------------------------------------------
+local keyMap = {
+    ["W"] = { KeyCode = Enum.KeyCode.W, VKey = 0x57 },
+    ["A"] = { KeyCode = Enum.KeyCode.A, VKey = 0x41 },
+    ["S"] = { KeyCode = Enum.KeyCode.S, VKey = 0x53 },
+    ["D"] = { KeyCode = Enum.KeyCode.D, VKey = 0x44 },
+}
+
+local function detectDodgeKey(btn)
+    btn = btn or getDodgeButton()
+    if not btn then return "D" end
+    
+    local txt = btn.Text
+    if txt and #txt > 0 then
+        local match = string.match(txt:upper(), "[WASD]")
+        if match then return match end
+    end
+    
+    for _, child in ipairs(btn:GetDescendants()) do
+        if child:IsA("TextLabel") or child:IsA("TextButton") then
+            local ctxt = child.Text
+            if ctxt and #ctxt > 0 then
+                local match = string.match(ctxt:upper(), "[WASD]")
+                if match then return match end
+            end
+        end
+    end
+    
+    local psIcons = btn:FindFirstChild("psIcons")
+    if psIcons then
+        local triangle = psIcons:FindFirstChild("psTriangle")
+        local square = psIcons:FindFirstChild("psSquare")
+        local cross = psIcons:FindFirstChild("psCross")
+        local circle = psIcons:FindFirstChild("psCircle")
+        
+        if triangle and triangle.Visible then return "W" end
+        if square and square.Visible then return "A" end
+        if cross and cross.Visible then return "S" end
+        if circle and circle.Visible then return "D" end
+    end
+    
+    return "D"
+end
+
+local hasDodgedThisPrompt = false
+local function executeDodge()
+    if hasDodgedThisPrompt then return end
+    hasDodgedThisPrompt = true
+    
+    local btn = getDodgeButton()
+    local keyChar = detectDodgeKey(btn)
+    local keyData = keyMap[keyChar] or keyMap["D"]
+    
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, keyData.KeyCode, false, game)
+        task.wait(0.02)
+        VirtualInputManager:SendKeyEvent(false, keyData.KeyCode, false, game)
+    end)
+    
+    if keypress and keyrelease then
+        pcall(function()
+            keypress(keyData.VKey)
+            task.wait(0.02)
+            keyrelease(keyData.VKey)
+        end)
+    end
+    
+    if btn then
+        pcall(function()
+            local pos = btn.AbsolutePosition + (btn.AbsoluteSize / 2)
+            VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+            task.wait(0.02)
+            VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+        end)
+        if firesignal then
+            pcall(function() firesignal(btn.MouseButton1Click) end)
+            pcall(function() firesignal(btn.Activated) end)
+        end
+    end
+    
+    pcall(function() Remotes.Dodge:FireServer(keyChar) end)
+    pcall(function() Remotes.Dodge:FireServer() end)
+    pcall(function() Remotes.DodgeResult:FireServer(true, keyChar) end)
+    pcall(function() Remotes.DodgeResult:FireServer(true) end)
+    pcall(function() Remotes.DodgePrompt:FireServer(keyChar) end)
+    
+    showBanner("⚡ หลบการโจมตีสำเร็จ! (กดปุ่ม " .. keyChar .. ")", Color3.fromRGB(50, 220, 120), 2)
+end
+
+-- เชื่อมต่อการนั่ง/ลุกเพื่อรีเซ็ตสถานะอย่างแม่นยำ
+local function setupCharacter(char)
+    if not char then return end
+    local hum = char:WaitForChild("Humanoid", 5)
+    if hum then
+        hum:GetPropertyChangedSignal("Sit"):Connect(function()
+            hasSlappedThisTurn = false
+            isSlappingNow = false
+            hasNotifiedAttackerThisRound = false
+            if not hum.Sit then
+                clearAttackerESP()
+                lastIdentifiedSlapper = nil
+            end
+        end)
+    end
+end
+
+LocalPlayer.CharacterAdded:Connect(setupCharacter)
+if LocalPlayer.Character then setupCharacter(LocalPlayer.Character) end
+
+-- ------------------------------------------------------------------------------
+-- 10. MAIN REAL-TIME LOOP
+-- ------------------------------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    local sg = getScreenGui()
+    if not sg then return end
+    
+    -- [1] ตรวจสอบ Dodge
+    local dodgeBtn = sg:FindFirstChild("dodgebut")
+    local dodgeActive = isDodgePromptActive(dodgeBtn)
+    
+    if dodgeActive then
+        if Config.AutoDodge and not hasDodgedThisPrompt then
+            if Config.DodgeDelay <= 0 then
+                executeDodge()
+            else
+                task.delay(Config.DodgeDelay, executeDodge)
+            end
+        end
+    else
+        hasDodgedThisPrompt = false
+    end
+    
+    -- [2] ตรวจสอบ Slap (ปั๊มปุ่ม SLAP จังหวะธรรมชาติ เนียนตา ปั๊มเต็ม 100% ทุกรอบ)
+    local slapReady = isSlapPromptActive()
+    
+    if slapReady then
+        if Config.AutoSlap and Config.AutoMashSlap and not hasSlappedThisTurn and not isSlappingNow then
+            performNaturalBurstSlap()
+        end
+    else
+        -- เมื่อปุ่ม SLAP หายไป หรือเปลี่ยนเป็น Wait... หรือเข้าสู่ช่วงทาย ให้รีเซ็ตสถานะทันที พร้อมสำหรับรอบถัดไป 100%
+        if not isSlappingNow then
+            hasSlappedThisTurn = false
+        end
+    end
+    
+    -- [3] สแกนตรวจจับคนตบ
+    if Config.NotifyAttacker then
+        scanArenaForSlapper()
+    end
+    
+    -- [4] ตรวจสอบป้าย Suspects
+    checkAndHighlightSuspects()
+    
+    -- [5] Auto Save Streak
+    if Config.AutoSaveStreak then
+        local saveFrame = sg:FindFirstChild("SaveStreakFrame")
+        if saveFrame and saveFrame.Visible then
+            local yesBtn = saveFrame:FindFirstChild("yes")
+            if yesBtn then
+                pcall(function() if firesignal then firesignal(yesBtn.MouseButton1Click) end end)
+            else
+                pcall(function() Remotes.SaveStreak:FireServer() end)
+            end
+        end
+    end
+end)
+
+-- ------------------------------------------------------------------------------
+-- 11. BUILD UI
+-- ------------------------------------------------------------------------------
+function buildUI()
+    if not Library then return end
+    
+    local Window = Library.new({
+        Title = "TANG HUB",
+        Subtitle = "Auto Slap & Combat V13",
+        ToggleKey = Enum.KeyCode.RightShift,
+    })
+
+    -- Combat Tab
+    Window:addSection("Combat")
+    local combatTab = Window:addTab({ Name = "Slap & Duel" })
+
+    combatTab:addGroup({ Title = "Natural Burst Slap", Description = "ปั๊มปุ่ม SLAP จังหวะธรรมชาติ เนียนตา ไม่เร็วเวอร์จนคนดูออก" })
+
+    combatTab:addToggle({
+        Name = "Auto Mash Slap (ปั๊มปุ่ม SLAP อัตโนมัติ)",
+        Description = "ปั๊มปุ่ม SLAP จังหวะคนจริง ปั๊มเต็ม 100% และรีเซ็ตพร้อมรอบถัดไปอัตโนมัติ",
+        Default = true,
+        Callback = function(state) Config.AutoMashSlap = state end,
+    })
+
+    combatTab:addSlider({
+        Name = "Mash Interval (จังหวะความเร็ว)",
+        Description = "ความเร็วคลิกละกี่วินาที (แนะนำ 0.16 - 0.22 วิ เนียนตาเหมือนคนกดย้ำจริง)",
+        Min = 0.10,
+        Max = 0.35,
+        Increment = 0.01,
+        Default = 0.18,
+        Callback = function(val) Config.MashInterval = val end,
+    })
+
+    combatTab:addToggle({
+        Name = "Insta-Kill Fling (ปลิดชีพกระเด็นทันที)",
+        Description = "ส่งสัญญาณ BikeKickFling การันตีกระเด็นหลุดสังเวียน",
+        Default = true,
+        Callback = function(state) Config.InstaFling = state end,
+    })
+
+    -- Defense Tab
+    Window:addSection("Defense")
+    local defenseTab = Window:addTab({ Name = "Dodge & Detection" })
+
+    defenseTab:addGroup({ Title = "Auto Dodge System (WASD)", Description = "ระบบหลบ W / A / S / D อัตโนมัติ" })
+
+    defenseTab:addToggle({
+        Name = "Auto Dodge (หลบการตบ WASD)",
+        Description = "ตรวจจับและกดปุ่ม W, A, S, D ให้อัตโนมัติทันที",
+        Default = true,
+        Callback = function(state) Config.AutoDodge = state end,
+    })
+
+    defenseTab:addSlider({
+        Name = "Dodge Delay (ดีเลย์หลบ)",
+        Description = "หน่วงเวลาหลบ (0 = Instant Perfect Dodge)",
+        Min = 0,
+        Max = 1,
+        Increment = 0.05,
+        Default = 0.0,
+        Callback = function(val) Config.DodgeDelay = val end,
+    })
+
+    defenseTab:addGroup({ Title = "Exact Slapper Detector", Description = "ตรวจจับเฉพาะคนตบจริง (แจ้งเตือนครั้งเดียว ไม่สแปม)" })
+
+    defenseTab:addToggle({
+        Name = "Notify Attacker (แจ้งเตือนคนตบ)",
+        Description = "แจ้งเตือนชื่อคนตบบนแถบ HUD (เตือนครั้งเดียวต่อรอบ ไม่มีเด้งรัว)",
+        Default = true,
+        Callback = function(state) Config.NotifyAttacker = state end,
+    })
+
+    defenseTab:addToggle({
+        Name = "Attacker ESP (ไฮไลท์ตัวคนตบสีแดง)",
+        Description = "ไฮไลท์ตัวคนตบเป็นสีแดง (ไม่ไฮไลท์คนนั่งเก้าอี้)",
+        Default = true,
+        Callback = function(state)
+            Config.AttackerESP = state
+            if not state then clearAttackerESP() end
+        end,
+    })
+
+    defenseTab:addToggle({
+        Name = "Highlight Suspect Card (ไฮไลท์การ์ดสีเขียว)",
+        Description = "เปลี่ยนกรอบการ์ดคนตบในป้าย Suspects เป็นสีเขียวนีออน",
+        Default = true,
+        Callback = function(state) Config.HighlightSuspectCard = state end,
+    })
+
+    defenseTab:addToggle({
+        Name = "Auto Guess (กดทายให้อัตโนมัติ)",
+        Description = "กดทายคนที่ตบจริงในการ์ด Suspects ให้อัตโนมัติทันที",
+        Default = true,
+        Callback = function(state) Config.AutoGuess = state end,
+    })
+
+    defenseTab:addToggle({
+        Name = "Auto Save Streak (เซฟสตรีคอัตโนมัติ)",
+        Description = "กดตกลงเซฟสตรีคทันทีเมื่อแพ้",
+        Default = true,
+        Callback = function(state) Config.AutoSaveStreak = state end,
+    })
+
+    -- System
+    Window:addSection("System")
+    Window:addSettings()
+    Window:addCredits("TANG HUB")
+end
+
+showBanner("✅ TANG HUB V13 พร้อมทำงาน! (ปั๊มครบ 6 ครั้งไม่ตัดจบ + ตบต่อเนื่องทุกรอบ 100%)", Color3.fromRGB(10, 132, 255), 3.5)
