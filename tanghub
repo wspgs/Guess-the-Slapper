@@ -116,40 +116,9 @@ local function notifyOnce(title, text, duration)
 end
 
 -- ------------------------------------------------------------------------------
--- 3. HTTP REQUEST & UI LIBRARY LOADER
+-- 3. ENVIRONMENT SETUP
 -- ------------------------------------------------------------------------------
-local httpRequest = (syn and syn.request) 
-    or (http and http.request) 
-    or http_request 
-    or (fluxus and fluxus.request) 
-    or request
-
-local function fetchSource(url)
-    if httpRequest then
-        local res = httpRequest({ Url = url, Method = "GET" })
-        if res and res.Body then return res.Body end
-    end
-    if game.HttpGet then return game:HttpGet(url) end
-    return nil
-end
-
-getgenv().TangHubLibraryOnly = true
-local UI_URL = "https://raw.githubusercontent.com/wspgs/Tangui.2/refs/heads/main/ui"
-local Library = nil
-
-task.spawn(function()
-    local ok, uiRaw = pcall(fetchSource, UI_URL)
-    if ok and uiRaw then
-        local chunk = loadstring(uiRaw)
-        if chunk then
-            local success, lib = pcall(chunk)
-            if success and lib then
-                Library = lib
-                buildUI()
-            end
-        end
-    end
-end)
+getgenv().TangHubLibraryOnly = nil -- ปิด flag เพื่อให้เมนู TANG HUB ดั้งเดิมถูกสร้างขึ้นอัตโนมัติ
 
 -- ------------------------------------------------------------------------------
 -- 4. GAME REMOTES
@@ -752,31 +721,44 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ------------------------------------------------------------------------------
--- 11. BUILD UI
+-- 11. BUILD UI (TANG HUB DEFAULT TABS)
 -- ------------------------------------------------------------------------------
-function buildUI()
-    if not Library then return end
-    
-    local Window = Library.new({
-        Title = "TANG HUB",
-        Subtitle = "Auto Slap & Combat V13",
-        ToggleKey = Enum.KeyCode.RightShift,
-    })
+local UI_URL = "https://raw.githubusercontent.com/wspgs/Tangui.2/refs/heads/main/ui"
 
-    -- Combat Tab
-    Window:addSection("Combat")
-    local combatTab = Window:addTab({ Name = "Slap & Duel" })
+local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+local response = req and req({ Url = UI_URL, Method = "GET" })
+local body = (response and response.Body) or (game.HttpGet and game:HttpGet(UI_URL))
 
-    combatTab:addGroup({ Title = "Natural Burst Slap", Description = "ปั๊มปุ่ม SLAP จังหวะธรรมชาติ เนียนตา ไม่เร็วเวอร์จนคนดูออก" })
+if not body then
+    return warn("[TANG HUB] load failed, status:", response and response.StatusCode)
+end
 
-    combatTab:addToggle({
+local chunk, compileError = loadstring(body)
+if not chunk then
+    return warn("[TANG HUB] compile error: " .. tostring(compileError))
+end
+
+getgenv().TangHubLibraryOnly = nil -- ปิด flag เพื่อให้เมนู TANG HUB ดั้งเดิมถูกสร้างขึ้นอัตโนมัติ
+
+local success, Library = pcall(chunk)
+if not success or not Library then
+    return warn("[TANG HUB] run error: " .. tostring(Library))
+end
+
+-- เมนู TANG HUB ขึ้นเองแล้ว เพิ่มฟังก์ชันลงแท็บได้เลย
+local tabs = Library.tabs
+
+if tabs and tabs.autoFarm then
+    tabs.autoFarm:addGroup({ Title = "Slap & Combat System", Description = "ปั๊มปุ่ม SLAP จังหวะธรรมชาติ เนียนตา ไม่เร็วเวอร์จนคนดูออก" })
+
+    tabs.autoFarm:addToggle({
         Name = "Auto Mash Slap (ปั๊มปุ่ม SLAP อัตโนมัติ)",
         Description = "ปั๊มปุ่ม SLAP จังหวะคนจริง ปั๊มเต็ม 100% และรีเซ็ตพร้อมรอบถัดไปอัตโนมัติ",
         Default = true,
         Callback = function(state) Config.AutoMashSlap = state end,
     })
 
-    combatTab:addSlider({
+    tabs.autoFarm:addSlider({
         Name = "Mash Interval (จังหวะความเร็ว)",
         Description = "ความเร็วคลิกละกี่วินาที (แนะนำ 0.16 - 0.22 วิ เนียนตาเหมือนคนกดย้ำจริง)",
         Min = 0.10,
@@ -786,27 +768,23 @@ function buildUI()
         Callback = function(val) Config.MashInterval = val end,
     })
 
-    combatTab:addToggle({
+    tabs.autoFarm:addToggle({
         Name = "Insta-Kill Fling (ปลิดชีพกระเด็นทันที)",
         Description = "ส่งสัญญาณ BikeKickFling การันตีกระเด็นหลุดสังเวียน",
         Default = true,
         Callback = function(state) Config.InstaFling = state end,
     })
 
-    -- Defense Tab
-    Window:addSection("Defense")
-    local defenseTab = Window:addTab({ Name = "Dodge & Detection" })
+    tabs.autoFarm:addGroup({ Title = "Auto Dodge System (WASD)", Description = "ระบบหลบ W / A / S / D อัตโนมัติ" })
 
-    defenseTab:addGroup({ Title = "Auto Dodge System (WASD)", Description = "ระบบหลบ W / A / S / D อัตโนมัติ" })
-
-    defenseTab:addToggle({
+    tabs.autoFarm:addToggle({
         Name = "Auto Dodge (หลบการตบ WASD)",
         Description = "ตรวจจับและกดปุ่ม W, A, S, D ให้อัตโนมัติทันที",
         Default = true,
         Callback = function(state) Config.AutoDodge = state end,
     })
 
-    defenseTab:addSlider({
+    tabs.autoFarm:addSlider({
         Name = "Dodge Delay (ดีเลย์หลบ)",
         Description = "หน่วงเวลาหลบ (0 = Instant Perfect Dodge)",
         Min = 0,
@@ -815,17 +793,19 @@ function buildUI()
         Default = 0.0,
         Callback = function(val) Config.DodgeDelay = val end,
     })
+end
 
-    defenseTab:addGroup({ Title = "Exact Slapper Detector", Description = "ตรวจจับเฉพาะคนตบจริง (แจ้งเตือนครั้งเดียว ไม่สแปม)" })
+if tabs and tabs.player then
+    tabs.player:addGroup({ Title = "Exact Slapper Detector", Description = "ตรวจจับเฉพาะคนตบจริง (แจ้งเตือนครั้งเดียว ไม่สแปม)" })
 
-    defenseTab:addToggle({
+    tabs.player:addToggle({
         Name = "Notify Attacker (แจ้งเตือนคนตบ)",
         Description = "แจ้งเตือนชื่อคนตบบนแถบ HUD (เตือนครั้งเดียวต่อรอบ ไม่มีเด้งรัว)",
         Default = true,
         Callback = function(state) Config.NotifyAttacker = state end,
     })
 
-    defenseTab:addToggle({
+    tabs.player:addToggle({
         Name = "Attacker ESP (ไฮไลท์ตัวคนตบสีแดง)",
         Description = "ไฮไลท์ตัวคนตบเป็นสีแดง (ไม่ไฮไลท์คนนั่งเก้าอี้)",
         Default = true,
@@ -835,31 +815,26 @@ function buildUI()
         end,
     })
 
-    defenseTab:addToggle({
+    tabs.player:addToggle({
         Name = "Highlight Suspect Card (ไฮไลท์การ์ดสีเขียว)",
         Description = "เปลี่ยนกรอบการ์ดคนตบในป้าย Suspects เป็นสีเขียวนีออน",
         Default = true,
         Callback = function(state) Config.HighlightSuspectCard = state end,
     })
 
-    defenseTab:addToggle({
+    tabs.player:addToggle({
         Name = "Auto Guess (กดทายให้อัตโนมัติ)",
         Description = "กดทายคนที่ตบจริงในการ์ด Suspects ให้อัตโนมัติทันที",
         Default = true,
         Callback = function(state) Config.AutoGuess = state end,
     })
 
-    defenseTab:addToggle({
+    tabs.player:addToggle({
         Name = "Auto Save Streak (เซฟสตรีคอัตโนมัติ)",
         Description = "กดตกลงเซฟสตรีคทันทีเมื่อแพ้",
         Default = true,
         Callback = function(state) Config.AutoSaveStreak = state end,
     })
-
-    -- System
-    Window:addSection("System")
-    Window:addSettings()
-    Window:addCredits("TANG HUB")
 end
 
-showBanner("✅ TANG HUB V13 พร้อมทำงาน! (ปั๊มครบ 6 ครั้งไม่ตัดจบ + ตบต่อเนื่องทุกรอบ 100%)", Color3.fromRGB(10, 132, 255), 3.5)
+showBanner("✅ TANG HUB พร้อมทำงาน! (เชื่อมแท็บ Auto Farm & Player เรียบร้อย)", Color3.fromRGB(10, 132, 255), 3.5)
